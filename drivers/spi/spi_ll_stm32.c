@@ -64,7 +64,9 @@ static void dma_callback(struct device *dev, void *arg,
 {
 	/* arg directly holds the spi device */
 	struct device *spi_dev = arg;
+	const struct spi_stm32_config *cfg = DEV_CFG(spi_dev);
 	struct spi_stm32_data *data = DEV_DATA(spi_dev);
+	SPI_TypeDef *spi = cfg->spi;
 
 	if (status != 0) {
 		LOG_ERR("DMA callback error with channel %d.", channel);
@@ -75,11 +77,43 @@ static void dma_callback(struct device *dev, void *arg,
 
 	/* identify the origin of this callback */
 	if (channel == data->dma_tx.channel) {
-		/* this part of the transfer ends */
-		data->dma_tx.transfer_complete = true;
+		if (data->ctx.tx_count > 1) {
+			LL_SPI_DisableDMAReq_TX(spi);
+			/*
+			 * Update the current Tx buffer, decreasing length of
+			 * data->ctx.tx_count, by its own length
+			 */
+			spi_context_update_tx(&data->ctx, 1, data->ctx.tx_len);
+			/* keep the same dest (peripheral) */
+			/* and reload dma with a new source (memory) buffer */
+			dma_reload(data->dev_dma_tx,
+				data->dma_tx.channel,
+				(uint32_t)data->ctx.tx_buf,
+				data->dma_tx.dma_cfg.head_block->dest_address,
+				data->ctx.tx_len);
+			LL_SPI_EnableDMAReq_TX(spi);
+		} else {
+			data->dma_tx.transfer_complete = true;
+		}
 	} else if (channel == data->dma_rx.channel) {
-		/* this part of the transfer ends */
-		data->dma_rx.transfer_complete = true;
+		if (data->ctx.rx_count > 1) {
+			LL_SPI_DisableDMAReq_RX(spi);
+			/*
+			 * Update the current Rx buffer, decreasing length of
+			 * data->ctx.rx_count, by its own length
+			 */
+			spi_context_update_rx(&data->ctx, 1, data->ctx.rx_len);
+			/* keep the same source (peripheral) */
+			/* and reload dma with a new dest (memory) buffer */
+			dma_reload(data->dev_dma_rx,
+				data->dma_rx.channel,
+				data->dma_rx.dma_cfg.head_block->source_address,
+				(uint32_t)data->ctx.rx_buf,
+				data->ctx.rx_len);
+			LL_SPI_EnableDMAReq_RX(spi);
+		} else {
+			data->dma_rx.transfer_complete = true;
+		}
 	} else {
 		LOG_ERR("DMA callback channel %d is not valid.", channel);
 		data->dma_tx.transfer_complete = true;
@@ -709,58 +743,14 @@ static int transceive_dma(struct device *dev,
 		return ret;
 	}
 
-	/* store spi peripheral address */
-	uint32_t periph_addr = data->dma_tx.dma_cfg.head_block->dest_address;
+	/* Wait for the DMA transfer to finish */
+	while(data->dma_rx.transfer_complete != true || data->dma_tx.transfer_complete != true) {
+		k_yield();
+	}
 
-	for (; ;) {
-		/* wait for SPI busy flag */
-		while (LL_SPI_IsActiveFlag_BSY(spi) == 1) {
-		}
-
-		/* once SPI is no more busy, wait for DMA transfer end */
-		while (spi_stm32_dma_transfer_ongoing(data) == 1) {
-		}
-
-		if ((data->ctx.tx_count <= 1) && (data->ctx.rx_count <= 1)) {
-			/* if it was the last count, then we are done */
-			break;
-		}
-
-		if (data->dma_tx.transfer_complete == true) {
-			LL_SPI_DisableDMAReq_TX(spi);
-			/*
-			 * Update the current Tx buffer, decreasing length of
-			 * data->ctx.tx_count,  by its own length
-			 */
-			spi_context_update_tx(&data->ctx, 1, data->ctx.tx_len);
-			/* keep the same dest (peripheral) */
-			data->dma_tx.transfer_complete = false;
-			/* and reload dma with a new source (memory) buffer */
-			dma_reload(data->dev_dma_tx,
-				data->dma_tx.channel,
-				(uint32_t)data->ctx.tx_buf,
-				periph_addr,
-				data->ctx.tx_len);
-		}
-
-		if (data->dma_rx.transfer_complete == true) {
-			LL_SPI_DisableDMAReq_RX(spi);
-			/*
-			 * Update the current Rx buffer, decreasing length of
-			 * data->ctx.rx_count,  by its own length
-			 */
-			spi_context_update_rx(&data->ctx, 1, data->ctx.rx_len);
-			/* keep the same source (peripheral) */
-			data->dma_rx.transfer_complete = false;
-			/* and reload dma with a new dest (memory) buffer */
-			dma_reload(data->dev_dma_rx,
-				data->dma_rx.channel,
-				periph_addr,
-				(uint32_t)data->ctx.rx_buf,
-				data->ctx.rx_len);
-		}
-		LL_SPI_EnableDMAReq_RX(spi);
-		LL_SPI_EnableDMAReq_TX(spi);
+	/* Wait for the last SPI tranfer to finish */
+	while (LL_SPI_IsActiveFlag_BSY(spi) == 1 || LL_SPI_IsActiveFlag_TXE(spi) == 0) {
+		k_yield();
 	}
 
 	/* end of the transfer : all buffers sent/receceived */
