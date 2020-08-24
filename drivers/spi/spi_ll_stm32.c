@@ -62,8 +62,9 @@ uint32_t dummy_rx_tx_buffer;
 static void dma_callback(struct device *dev, void *arg,
 			 uint32_t channel, int status)
 {
-	/* arg directly holds the client data */
-	struct spi_stm32_data *data = arg;
+	/* arg directly holds the spi device */
+	struct device *spi_dev = arg;
+	struct spi_stm32_data *data = DEV_DATA(spi_dev);
 
 	if (status != 0) {
 		LOG_ERR("DMA callback error with channel %d.", channel);
@@ -130,8 +131,8 @@ static int spi_stm32_dma_tx_load(struct device *dev, const uint8_t *buf,
 
 	/* direction is given by the DT */
 	stream->dma_cfg.head_block = &blk_cfg;
-	/* give the client data as arg, as the callback comes from the dma */
-	stream->dma_cfg.user_data = data;
+	/* give the client dev as arg, as the callback comes from the dma */
+	stream->dma_cfg.user_data = dev;
 	/* pass our client origin to the dma: data->dma_tx.dma_channel */
 	ret = dma_config(data->dev_dma_tx, data->dma_tx.channel,
 			&stream->dma_cfg);
@@ -188,7 +189,7 @@ static int spi_stm32_dma_rx_load(struct device *dev, uint8_t *buf, size_t len)
 
 	/* direction is given by the DT */
 	stream->dma_cfg.head_block = &blk_cfg;
-	stream->dma_cfg.user_data = data;
+	stream->dma_cfg.user_data = dev;
 
 
 	/* pass our client origin to the dma: data->dma_rx.channel */
