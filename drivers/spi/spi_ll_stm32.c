@@ -53,8 +53,10 @@ LOG_MODULE_REGISTER(spi_ll_stm32);
 
 
 #ifdef CONFIG_SPI_STM32_DMA
-/* dummy value used for transferring NOP when tx buf is null */
-uint32_t nop_tx;
+/* dummy value used for transferring NOP when tx buf is null
+ * and use as dummy sink for when rx buf is null
+ */
+uint32_t dummy_rx_tx_buffer;
 
 /* This function is executed in the interrupt context */
 static void dma_callback(struct device *dev, void *arg,
@@ -102,9 +104,9 @@ static int spi_stm32_dma_tx_load(struct device *dev, const uint8_t *buf,
 
 	/* tx direction has memory as source and periph as dest. */
 	if (buf == NULL) {
-		nop_tx = 0;
+		dummy_rx_tx_buffer = 0;
 		/* if tx buff is null, then sends NOP on the line. */
-		blk_cfg.source_address = (uint32_t)&nop_tx;
+		blk_cfg.source_address = (uint32_t)&dummy_rx_tx_buffer;
 		blk_cfg.source_addr_adj = DMA_ADDR_ADJ_NO_CHANGE;
 	} else {
 		blk_cfg.source_address = (uint32_t)buf;
@@ -159,18 +161,26 @@ static int spi_stm32_dma_rx_load(struct device *dev, uint8_t *buf, size_t len)
 	memset(&blk_cfg, 0, sizeof(blk_cfg));
 	blk_cfg.block_size = len;
 
+
 	/* rx direction has periph as source and mem as dest. */
-	blk_cfg.dest_address = (buf != NULL) ? (uint32_t)buf : (uint32_t)NULL;
+	if (buf == NULL) {
+		/* if rx buff is null, then write data to dummy address. */
+		blk_cfg.dest_address = (uint32_t)&dummy_rx_tx_buffer;
+		blk_cfg.dest_addr_adj = DMA_ADDR_ADJ_NO_CHANGE;
+	} else {
+		blk_cfg.dest_address = (uint32_t)buf;
+		if (data->dma_rx.dst_addr_increment) {
+			blk_cfg.dest_addr_adj = DMA_ADDR_ADJ_INCREMENT;
+		} else {
+			blk_cfg.dest_addr_adj = DMA_ADDR_ADJ_NO_CHANGE;
+		}
+	}
+
 	blk_cfg.source_address = (uint32_t)LL_SPI_DMA_GetRegAddr(cfg->spi);
 	if (data->dma_rx.src_addr_increment) {
 		blk_cfg.source_addr_adj = DMA_ADDR_ADJ_INCREMENT;
 	} else {
 		blk_cfg.source_addr_adj = DMA_ADDR_ADJ_NO_CHANGE;
-	}
-	if (data->dma_rx.dst_addr_increment) {
-		blk_cfg.dest_addr_adj = DMA_ADDR_ADJ_INCREMENT;
-	} else {
-		blk_cfg.dest_addr_adj = DMA_ADDR_ADJ_NO_CHANGE;
 	}
 
 	/* give the fifo mode from the DT */
@@ -202,8 +212,16 @@ static int spi_dma_move_buffers(struct device *dev)
 	int ret;
 
 	/* the length to transmit depends on the source data size (1,2 4) */
-	data->dma_segment_len = data->ctx.tx_len
+	if (data->ctx.tx_len > 0) {
+		data->dma_segment_len = data->ctx.tx_len
 			/ data->dma_tx.dma_cfg.source_data_size;
+	} else if (data->ctx.rx_len > 0) {
+		data->dma_segment_len = data->ctx.rx_len
+			/ data->dma_rx.dma_cfg.source_data_size;
+	} else {
+		LOG_ERR("RX len and TX len are 0");
+		return -1;
+	}
 
 	/* Load receive first, so it can accept transmit data */
 	if (data->ctx.rx_len) {
