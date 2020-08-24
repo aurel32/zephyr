@@ -680,12 +680,15 @@ static int transceive_dma(struct device *dev,
 	/* Set buffers info */
 	spi_context_buffers_setup(&data->ctx, tx_bufs, rx_bufs, 1);
 
+	LL_SPI_Enable(spi);
+
+	/* This is turned off in spi_stm32_complete(). */
+	spi_context_cs_control(&data->ctx, true);
+
 	ret = spi_dma_move_buffers(dev);
 	if (ret) {
 		return ret;
 	}
-
-	LL_SPI_Enable(spi);
 
 	/* store spi peripheral address */
 	uint32_t periph_addr = data->dma_tx.dma_cfg.head_block->dest_address;
@@ -744,8 +747,7 @@ static int transceive_dma(struct device *dev,
 	/* end of the transfer : all buffers sent/receceived */
 	LL_SPI_Disable(spi);
 
-	/* This is turned off in spi_stm32_complete(). */
-	spi_context_cs_control(&data->ctx, true);
+	spi_stm32_complete(data, spi, ret);
 
 	spi_context_release(&data->ctx, ret);
 
